@@ -4,7 +4,10 @@ import com.revrobotics.spark.SparkMax;
 import com.revrobotics.spark.SparkLowLevel.MotorType; // Import necessário para o tipo do motor
 import edu.wpi.first.wpilibj.Joystick;
 import edu.wpi.first.wpilibj.drive.DifferentialDrive;
+import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import frc.robot.Motor.Spark_INTER;
+import frc.robot.Sensor.Pigeon;
+import frc.robot.Sensor.Sensor_INTER;
 
 public class DRIVE extends DRIVE_ABS {
  
@@ -14,6 +17,8 @@ public class DRIVE extends DRIVE_ABS {
   private SparkMax ESQ2;
   private SparkMax DIR2;
 
+  private Sensor_INTER pigeon = new Pigeon(1);
+
   public DRIVE() {
     // 2. CORREÇÃO: Inicializamos os motores com IDs reais e o tipo correto (ex: kBrushed)
     ESQ = new SparkMax(1, MotorType.kBrushed);
@@ -22,6 +27,7 @@ public class DRIVE extends DRIVE_ABS {
     DIR2 = new SparkMax(3, MotorType.kBrushed);
     // Boa prática: Inverter o lado direito para não andar em círculos
     DIR.setInverted(true);
+    pigeon.ResetSensor(); // Resetar o sensor ao iniciar
 
     configurarMotores(ESQ, DIR);
   }
@@ -29,6 +35,10 @@ public class DRIVE extends DRIVE_ABS {
   @Override
   public void periodic(){
     super.periodic();
+    SmartDashboard.putNumber("Pigeon Yaw", pigeon.Getsensor());
+    SmartDashboard.putNumber("Pigeon Pitch", pigeon.Getsensor(2));
+    SmartDashboard.putNumber("Pigeon Roll", pigeon.Getsensor(3));
+    
   }
   
     

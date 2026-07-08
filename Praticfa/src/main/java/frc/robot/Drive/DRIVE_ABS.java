@@ -23,7 +23,6 @@ public abstract class DRIVE_ABS extends SubsystemBase implements Spark_INTER {
     public void dashboard() {
         if (drive != null) {
             SmartDashboard.putData("Drivetrain", drive);
-            //SmartDashboard.putNumber("algo", this.getVelocidade());
         }   
     }
 
