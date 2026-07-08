@@ -2,24 +2,27 @@ package frc.robot;
 
 import com.ctre.phoenix6.hardware.Pigeon2;
 import com.pathplanner.lib.auto.AutoBuilder;
-import com.pathplanner.lib.auto.NamedCommands;
 import com.pathplanner.lib.config.RobotConfig;
 import com.pathplanner.lib.controllers.PPLTVController;
-import com.pathplanner.lib.events.EventTrigger;
-import com.pathplanner.lib.util.PathPlannerLogging;
 import com.revrobotics.RelativeEncoder;
 import com.revrobotics.spark.SparkBase;
 import com.revrobotics.spark.SparkLowLevel.MotorType;
 import com.revrobotics.spark.SparkMax;
 import com.revrobotics.spark.config.SparkMaxConfig;
 
+import edu.wpi.first.math.controller.PIDController;
+import edu.wpi.first.math.controller.SimpleMotorFeedforward;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
-import edu.wpi.first.math.kinematics.*;
+import edu.wpi.first.math.kinematics.ChassisSpeeds;
+import edu.wpi.first.math.kinematics.DifferentialDriveKinematics;
+import edu.wpi.first.math.kinematics.DifferentialDriveOdometry;
+import edu.wpi.first.math.kinematics.DifferentialDriveWheelSpeeds;
+import edu.wpi.first.math.system.plant.DCMotor;
 import edu.wpi.first.math.util.Units;
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.RobotBase;
-import edu.wpi.first.wpilibj.drive.DifferentialDrive;
+import edu.wpi.first.wpilibj.simulation.DifferentialDrivetrainSim;
 import edu.wpi.first.wpilibj.smartdashboard.Field2d;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
@@ -27,229 +30,193 @@ import edu.wpi.first.wpilibj2.command.SubsystemBase;
 public class Drive_sub extends SubsystemBase {
 
   // ======================
-  // CONSTANTES
+  // 1. PARÂMETROS DE CONTROLE (CORRIGIDOS)
   // ======================
-  private static final double TRACK_WIDTH = 0.7112; // DEVE bater com settings.json
-  private static final double WHEEL_DIAMETER = Units.inchesToMeters(6);
-  private static final double GEAR_RATIO = 10.71;
-  private static final double METERS_PER_ROTATION =
-      (Math.PI * WHEEL_DIAMETER) / GEAR_RATIO;
+  private static final double TRACK_WIDTH = 0.65; 
+  private static final double WHEEL_RADIUS = Units.inchesToMeters(3); // 0.0762m
+  private static final double GEAR_RATIO = 10.71; 
+  private static final double METERS_PER_ROTATION = (2 * Math.PI * WHEEL_RADIUS) / GEAR_RATIO;
+
+  // Velocidades realistas para um Chassi CIM/NEO de 10.71 (~3.9 m/s teórico)
+  private static final double MAX_SPEED = 3.5; 
+  private static final double MAX_ANGULAR_SPEED = 6.0; 
 
   // ======================
-  // HARDWARE
+  // 2. MOTORES E SENSORES
   // ======================
-  private final SparkMax leftMaster  = new SparkMax(1, MotorType.kBrushless);
-  private final SparkMax rightMaster = new SparkMax(2, MotorType.kBrushless);
-  private final SparkMax leftFollow  = new SparkMax(3, MotorType.kBrushless);
-  private final SparkMax rightFollow = new SparkMax(4, MotorType.kBrushless);
+  private final SparkMax leftLeader = new SparkMax(1, MotorType.kBrushless);
+  private final SparkMax rightLeader = new SparkMax(2, MotorType.kBrushless);
+  private final SparkMax leftFollower = new SparkMax(3, MotorType.kBrushless);
+  private final SparkMax rightFollower = new SparkMax(4, MotorType.kBrushless);
 
-  private final RelativeEncoder leftEncoder  = leftMaster.getEncoder();
-  private final RelativeEncoder rightEncoder = rightMaster.getEncoder();
-
+  private final RelativeEncoder leftEncoder = leftLeader.getEncoder();
+  private final RelativeEncoder rightEncoder = rightLeader.getEncoder();
   private final Pigeon2 gyro = new Pigeon2(0);
 
-  DifferentialDrive drive = new DifferentialDrive(leftMaster, rightMaster);
-
   // ======================
-  // SIMULAÇÃO
+  // 3. CONTROLE E FILTRAGEM
   // ======================
-  private double simLeftPos = 0;
-  private double simRightPos = 0;
-  private double simLeftVel = 0;
-  private double simRightVel = 0;
-  private Rotation2d simGyroRotation = new Rotation2d();
-
-  private final DifferentialDriveKinematics kinematics =
-      new DifferentialDriveKinematics(TRACK_WIDTH);
-
+  private final DifferentialDriveKinematics kinematics = new DifferentialDriveKinematics(TRACK_WIDTH);
   private final DifferentialDriveOdometry odometry;
+  
+  // PID ajustado para velocidade (Erro em m/s gerando saída em Volts)
+  private final PIDController leftPID = new PIDController(1.5, 0.0, 0.0);
+  private final PIDController rightPID = new PIDController(1.5, 0.0, 0.0);
+  
+  // kV recalculado: 12V / 3.9m/s = ~3.0. kS superando o atrito estático.
+  private final SimpleMotorFeedforward feedforward = new SimpleMotorFeedforward(0.15, 2.8, 0.2);
+
+  // Simulação
+  private DifferentialDrivetrainSim drivetrainSim;
+  private com.revrobotics.sim.SparkMaxSim leftSim;
+  private com.revrobotics.sim.SparkMaxSim rightSim;
+  
   private final Field2d field = new Field2d();
 
   public Drive_sub() {
-
-    SmartDashboard.putBoolean("EventoAtivo", false);
-
-        SmartDashboard.putBoolean("Atirando", false);
-
-    drive.setSafetyEnabled(false);
-    SparkMaxConfig masterConfig = new SparkMaxConfig();
-    masterConfig.encoder
+    SparkMaxConfig config = new SparkMaxConfig();
+    config.encoder
         .positionConversionFactor(METERS_PER_ROTATION)
         .velocityConversionFactor(METERS_PER_ROTATION / 60.0);
+    
+    leftLeader.configure(config, SparkBase.ResetMode.kResetSafeParameters, SparkBase.PersistMode.kNoPersistParameters);
+    
+    config.inverted(true); 
+    rightLeader.configure(config, SparkBase.ResetMode.kResetSafeParameters, SparkBase.PersistMode.kNoPersistParameters);
 
-    SparkMaxConfig followLeftConfig = new SparkMaxConfig();
-    SparkMaxConfig followRightConfig = new SparkMaxConfig();
+    // Seguidores
+    SparkMaxConfig leftFollowConfig = new SparkMaxConfig();
+    leftFollowConfig.follow(1);
+    leftFollower.configure(leftFollowConfig, SparkBase.ResetMode.kResetSafeParameters, SparkBase.PersistMode.kNoPersistParameters);
 
-    followLeftConfig.follow(1);
-    followRightConfig.follow(2);
+    SparkMaxConfig rightFollowConfig = new SparkMaxConfig();
+    rightFollowConfig.follow(2);
+    rightFollower.configure(rightFollowConfig, SparkBase.ResetMode.kResetSafeParameters, SparkBase.PersistMode.kNoPersistParameters);
 
-    leftMaster.configure(
-        masterConfig,
-        SparkBase.ResetMode.kResetSafeParameters,
-        SparkBase.PersistMode.kNoPersistParameters
-    );
+    odometry = new DifferentialDriveOdometry(gyro.getRotation2d(), 0, 0);
 
-    rightMaster.configure(
-        masterConfig,
-        SparkBase.ResetMode.kResetSafeParameters,
-        SparkBase.PersistMode.kNoPersistParameters
-    );
+    if (RobotBase.isSimulation()) {
+      initSimulation();
+    }
 
-    leftFollow.configure(
-        followLeftConfig,
-        SparkBase.ResetMode.kResetSafeParameters,
-        SparkBase.PersistMode.kNoPersistParameters
-    );
-
-    rightFollow.configure(
-        followRightConfig,
-        SparkBase.ResetMode.kResetSafeParameters,
-        SparkBase.PersistMode.kNoPersistParameters
-    );
-
-    odometry = new DifferentialDriveOdometry(
-        gyro.getRotation2d(),
-        0,
-        0
-    );
-
-    configurePathPlanner();
+    setupPathPlanner();
     SmartDashboard.putData("Field", field);
   }
 
-  // ======================
-  // PATHPLANNER
-  // ======================
-  private void configurePathPlanner() {
+  private void initSimulation() {
+    leftSim = new com.revrobotics.sim.SparkMaxSim(leftLeader, DCMotor.getCIM(2));
+    rightSim = new com.revrobotics.sim.SparkMaxSim(rightLeader, DCMotor.getCIM(2));
 
-    
+    drivetrainSim = new DifferentialDrivetrainSim(
+        DCMotor.getCIM(2), 
+        GEAR_RATIO, 
+        6.0,                // Inércia Jóia (MOI)
+        45.0,               // Peso do robô em kg
+        WHEEL_RADIUS, 
+        TRACK_WIDTH, 
+        null
+    );
+  }
 
+  private void setupPathPlanner() {
     try {
-      RobotConfig robotConfig = RobotConfig.fromGUISettings();
-
+      RobotConfig config = RobotConfig.fromGUISettings();
       AutoBuilder.configure(
           this::getPose,
           this::resetPose,
           this::getRobotRelativeSpeeds,
           this::driveRobotRelative,
           new PPLTVController(0.02),
-          robotConfig,
-          () -> DriverStation.getAlliance()
-              .map(a -> a == DriverStation.Alliance.Red)
-              .orElse(false),
+          config,
+          () -> DriverStation.getAlliance().map(a -> a == DriverStation.Alliance.Red).orElse(false),
           this
       );
     } catch (Exception e) {
-      DriverStation.reportError("PathPlanner Error", e.getStackTrace());
+      DriverStation.reportError("PathPlanner: " + e.getMessage(), e.getStackTrace());
     }
-
-    PathPlannerLogging.setLogActivePathCallback(
-        poses -> field.getObject("path").setPoses(poses)
-    );
-
   }
 
-  // ======================
-  // LOOP
-  // ======================
   @Override
   public void periodic() {
-    if (RobotBase.isSimulation()) {
-      odometry.update(simGyroRotation, simLeftPos, simRightPos);
-    } else {
-      odometry.update(
-          gyro.getRotation2d(),
-          leftEncoder.getPosition(),
-          rightEncoder.getPosition()
-      );
-    }
-
+    // Agora o Gyro funciona uniformemente tanto na simulação quanto no real
+    odometry.update(
+        gyro.getRotation2d(),
+        leftEncoder.getPosition(),
+        rightEncoder.getPosition()
+    );
     field.setRobotPose(getPose());
   }
 
-  // ======================
-  // DRIVE
-  // ======================
-  public void driveRobotRelative(ChassisSpeeds robotRelativeSpeeds) {
+  @Override
+  public void simulationPeriodic() {
+    // Captura as tensões aplicadas pelos controladores virtuais
+    double leftVolts = leftSim.getAppliedOutput() * 12.0;
+    double rightVolts = -rightSim.getAppliedOutput() * 12.0; 
 
-    ChassisSpeeds targetSpeeds =
-        ChassisSpeeds.discretize(robotRelativeSpeeds, 0.02);
+    drivetrainSim.setInputs(leftVolts, rightVolts);
+    drivetrainSim.update(0.020);
 
-    DifferentialDriveWheelSpeeds wheelSpeeds =
-        kinematics.toWheelSpeeds(targetSpeeds);
+    // Converte a velocidade linear da física simulada de volta para RPM da REV
+    double leftRPM = (drivetrainSim.getLeftVelocityMetersPerSecond() / METERS_PER_ROTATION) * 60.0;
+    double rightRPM = (drivetrainSim.getRightVelocityMetersPerSecond() / METERS_PER_ROTATION) * 60.0;
 
-    if (RobotBase.isSimulation()) {
+    leftSim.iterate(leftRPM, 12.0, 0.020);
+    rightSim.iterate(-rightRPM, 12.0, 0.020); 
 
-      simLeftVel = wheelSpeeds.leftMetersPerSecond;
-      simRightVel = wheelSpeeds.rightMetersPerSecond;
-
-      simLeftPos += simLeftVel * 0.02;
-      simRightPos += simRightVel * 0.02;
-
-      simGyroRotation = simGyroRotation.plus(
-          new Rotation2d(targetSpeeds.omegaRadiansPerSecond * 0.02)
-      );
-
-    } else {
-      // Controle simples e estável (igual ao código que funciona)
-      leftMaster.set(wheelSpeeds.leftMetersPerSecond / 3.0);
-      rightMaster.set(wheelSpeeds.rightMetersPerSecond / 3.0);
-    }
+    // 🔥 SOLUÇÃO DO PIGEON: Atualiza o estado de simulação do hardware Phoenix 6 diretamente
+    gyro.getSimState().setRawYaw(drivetrainSim.getHeading().getDegrees());
   }
 
-  // ======================
-  // ODOMETRIA
-  // ======================
-  public Pose2d getPose() {
-    return odometry.getPoseMeters();
+  /**
+   * Movimentação controlada por PID + Feedforward robusto
+   */
+  public void driveRobotRelative(ChassisSpeeds speeds) {
+    // Limitadores dinâmicos baseados no teto físico real do robô
+    double vx = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, speeds.vxMetersPerSecond));
+    double omega = Math.max(-MAX_ANGULAR_SPEED, Math.min(MAX_ANGULAR_SPEED, speeds.omegaRadiansPerSecond));
+    
+    DifferentialDriveWheelSpeeds wheelSpeeds = kinematics.toWheelSpeeds(new ChassisSpeeds(vx, 0, omega));
+
+    // PID calcula a correção com base no erro de velocidade real vs desejada
+    double leftOutput = leftPID.calculate(leftEncoder.getVelocity(), wheelSpeeds.leftMetersPerSecond)
+                        + feedforward.calculate(wheelSpeeds.leftMetersPerSecond);
+    
+    double rightOutput = rightPID.calculate(rightEncoder.getVelocity(), wheelSpeeds.rightMetersPerSecond)
+                         + feedforward.calculate(wheelSpeeds.rightMetersPerSecond);
+
+    leftLeader.setVoltage(leftOutput);
+    rightLeader.setVoltage(rightOutput);
   }
+
+  /**
+   * Controle Arcade suave para Teleoperado
+   */
+  public void setArcade(double speed, double rotation) {
+    // Aplica uma curva cúbica para manter sensibilidade fina no centro do analógico
+    double s = Math.pow(speed, 3);
+    double r = Math.pow(rotation, 3);
+    driveRobotRelative(new ChassisSpeeds(s * MAX_SPEED, 0, -r * MAX_ANGULAR_SPEED));
+  }
+
+  public Pose2d getPose() { return odometry.getPoseMeters(); }
 
   public void resetPose(Pose2d pose) {
-
     leftEncoder.setPosition(0);
     rightEncoder.setPosition(0);
-
+    
     if (RobotBase.isSimulation()) {
-      simLeftPos = 0;
-      simRightPos = 0;
-      simGyroRotation = pose.getRotation();
+      drivetrainSim.setPose(pose);
+      gyro.getSimState().setRawYaw(pose.getRotation().getDegrees());
+    } else {
+      gyro.setYaw(pose.getRotation().getDegrees());
     }
 
-    odometry.resetPosition(
-        gyro.getRotation2d(),
-        leftEncoder.getPosition(),
-        rightEncoder.getPosition(),
-        pose
-    );
+    odometry.resetPosition(gyro.getRotation2d(), 0, 0, pose);
   }
-  // MOVIMENTAÇÃO
 
   public ChassisSpeeds getRobotRelativeSpeeds() {
-
-    if (RobotBase.isSimulation()) {
-      return kinematics.toChassisSpeeds(
-          new DifferentialDriveWheelSpeeds(simLeftVel, simRightVel)
-      );
-    }
-
     return kinematics.toChassisSpeeds(
-        new DifferentialDriveWheelSpeeds(
-            leftEncoder.getVelocity(),
-            rightEncoder.getVelocity()
-        )
+        new DifferentialDriveWheelSpeeds(leftEncoder.getVelocity(), rightEncoder.getVelocity())
     );
   }
-
- public void setArcade(double reto, double rotacao) {
-   // Multiplicamos por uma velocidade máxima (ex: 3 m/s e 4 rad/s)
-   // para converter o sinal do joystick (-1 a 1) em unidades reais
-   double linearVel = reto * 3.0; 
-   double angularVel = -rotacao * 4.0; // Invertido para o padrão da WPILib
-
-   // Encaminha para o método que já lida com Real vs Simulação
-   driveRobotRelative(new ChassisSpeeds(linearVel, 0, angularVel));
-   
-   // Alimenta o MotorSafety se ele estiver ativado
-   drive.feed();
- }
 }

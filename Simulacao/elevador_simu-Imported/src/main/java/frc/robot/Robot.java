@@ -2,6 +2,7 @@ package frc.robot;
 
 import edu.wpi.first.wpilibj.Joystick;
 import edu.wpi.first.wpilibj.TimedRobot;
+import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import frc.robot.subsystems.Elevator;
 import frc.robot.Constants;
 
@@ -19,11 +20,15 @@ public class Robot extends TimedRobot {
   public void teleopPeriodic() {
     // Botão 1 -> sobe até o topo
     if (joystick.getRawButton(1)) {
-      elevator.reachGoal(0.6);
+      elevator.reachGoal(8.0); // altura alvo máxima do elevador em metros
     }
     // Botão 2 -> desce até a base
     else if (joystick.getRawButton(2)) {
       elevator.reachGoal(Constants.kMinElevatorHeightMeters);
+    }
+
+    else if (joystick.getRawButton(3)) {
+      elevator.reachGoal(SmartDashboard.getNumber("Elevator Goal Target", 0.0)); // altura alvo intermediária do elevador em metros
     }
   
     // Nenhum botão -> para
